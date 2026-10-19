@@ -48,6 +48,19 @@
 #define CFG_BQ_VREG_MV          0u          /* dien ap sac day, 10 mV/buoc */
 #define CFG_BQ_ICHG_MA          0u          /* dong sac, 10 mA/buoc (50..5000) */
 #define CFG_BQ_IINDPM_MA        0u          /* gioi han dong lay tu nguon vao, 10 mA/buoc */
+/* MPPT cho tam pin mat troi cam vao jack DC (datasheet 7.3.6.3): chip dinh ky ngat bo bien doi,
+ * do ap ho mach VOC cua tam pin roi dat VINDPM = VOC_PCT * VOC. Voi adapter thi vo hai
+ * (chi tam dung sac VOC_DLY moi VOC_RATE). Chip khong cho bat khi VBAT < VSYSMIN va tu tat
+ * khi rut nguon, nen firmware tu bat lai moi khi co nguon vao.
+ * MPPT chi tac dong khi tam pin khong cap du ICHG: muon lay het cong suat tam pin thi dat
+ * CFG_BQ_ICHG_MA cao (trong gioi han cua pin). */
+#define CFG_BQ_MPPT             1
+#define CFG_BQ_VOC_PCT          5           /* VINDPM/VOC: 0=56.25% 1=62.5% 2=68.75% 3=75% 4=81.25% 5=87.5% 6=93.75% 7=100% */
+#define CFG_BQ_VOC_DLY          1           /* cho truoc khi do VOC: 0=50ms 1=300ms 2=2s 3=5s */
+#define CFG_BQ_VOC_RATE         1           /* chu ky do VOC: 0=30s 1=2phut 2=10phut 3=30phut */
+
+/* Loai pin de uoc luong % tren man hinh: 0 = Li-ion/Li-po (3.3..4.2 V/cell), 1 = LiFePO4 */
+#define CFG_BAT_CHEMISTRY       0
 
 /* ===================== Dau vao -> relay ===================== */
 /* 1: IN1 dieu khien RELAY1, IN2 dieu khien RELAY2 (relay theo trang thai dau vao,

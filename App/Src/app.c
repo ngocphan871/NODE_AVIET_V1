@@ -37,7 +37,7 @@ static char node_id[9];
 static mb_status_t mb_st = MB_ERR_TIMEOUT;
 static uint16_t mb_regs[MB_MAX_REGS];
 
-static bq_status_t bq;
+static bq_info_t bq;
 static bool bq_ok;
 
 static uint32_t lora_tx_count, lora_tx_fail, lora_rx_count, lora_cmd_count;
@@ -127,9 +127,57 @@ static void poll_modbus(void)
     mb_st = mb_read_regs(CFG_MB_SLAVE, CFG_MB_FUNC, CFG_MB_START_REG, CFG_MB_REG_COUNT, mb_regs);
 }
 
+/* Doc IC sac moi giay; in ra console khi trang thai sac / nguon vao / loi thay doi */
 static void poll_bq(void)
 {
-    bq_ok = bq_read(&bq);
+    static bool first = true;
+    static uint8_t last_chg;
+    static bool last_vbus, last_mppt;
+    static uint16_t last_vindpm;
+    static char last_fault[96];
+    char fault[96];
+
+    bool ok = bq_read(&bq);
+    if (ok != bq_ok && !first) {
+        printf("[BQ] %s\n", ok ? "IC sac tra loi lai" : "IC sac MAT KET NOI I2C");
+    }
+    bq_ok = ok;
+    if (!ok) { return; }
+
+    if (bq_mppt_task(&bq)) {
+        bq_read(&bq);
+        printf("[BQ] Bat MPPT (VBUS %u mV) -> %s\n", bq.vbus_mv, bq.mppt_on ? "OK" : "chip tu choi");
+    }
+    if (!first && bq.mppt_on != last_mppt && !bq.mppt_on) {
+        printf("[BQ] MPPT tat (%s)\n", bq.vbus_present ? "VBAT < VSYSMIN?" : "mat nguon vao");
+    }
+    if (bq.mppt_on && bq.vindpm_mv != last_vindpm) {
+        /* Moi lan do VOC chip dat lai VINDPM = VOC_PCT * VOC */
+        printf("[BQ] MPPT: VINDPM %u -> %u mV\n", last_vindpm, bq.vindpm_mv);
+    }
+    last_mppt = bq.mppt_on;
+    last_vindpm = bq.vindpm_mv;
+
+    bq_fault_str(&bq, fault, sizeof(fault));
+    if (!first) {
+        if (bq.vbus_present != last_vbus) {
+            printf("[BQ] Nguon vao: %s (%u mV, %s)\n", bq.vbus_present ? "CAM VAO" : "RUT RA",
+                   bq.vbus_mv, bq_vbus_str(bq.vbus_stat));
+            report_now = true;
+        }
+        if (bq.chg_stat != last_chg) {
+            printf("[BQ] Sac: %s -> %s (VBAT %u mV, IBAT %d mA)\n", bq_chg_str(last_chg),
+                   bq_chg_str(bq.chg_stat), bq.vbat_mv, bq.ibat_ma);
+        }
+        if (strcmp(fault, last_fault) != 0) {
+            printf("[BQ] Loi: %s\n", fault[0] ? fault : "het loi");
+            if (fault[0]) { report_now = true; }
+        }
+    }
+    first = false;
+    last_vbus = bq.vbus_present;
+    last_chg = bq.chg_stat;
+    snprintf(last_fault, sizeof(last_fault), "%s", fault);
 }
 
 static void print_status(void)
@@ -148,8 +196,8 @@ static void print_status(void)
     }
     printf("\n");
     if (bq_ok) {
-        printf("Pin    : VBAT %u mV, IBAT %d mA, VIN %u mV, %s\n",
-               bq.vbat_mv, bq.ibat_ma, bq.vbus_mv, bq_chg_str(bq.chg_stat));
+        printf("Pin    : VBAT %u mV (~%u%%), IBAT %d mA, VIN %u mV, %s\n",
+               bq.vbat_mv, bq_battery_percent(&bq), bq.ibat_ma, bq.vbus_mv, bq_chg_str(bq.chg_stat));
     } else {
         printf("Pin    : BQ25798 khong tra loi\n");
     }
@@ -166,8 +214,10 @@ static void print_status(void)
 /*
  * Goi gui ve gateway, vi du:
  * {"id":"1A2B3C4D","n":12,"up":3600,"in":[0,1,0],"rl":[0,1],"f1":[1500,23000],"f2":[0,0],
- *  "vb":12450,"ib":-120,"vin":0,"chg":0,"rs":-87,"mb":[1,2,3]}
- *   f1/f2 = [mL/phut, tong mL]; vb/ib = pin mV/mA; vin = nguon vao mV; chg = trang thai sac;
+ *  "vb":12450,"ib":-120,"bp":80,"vin":0,"chg":0,"rs":-87,"mb":[1,2,3]}
+ *   f1/f2 = [mL/phut, tong mL]; vb/ib = pin mV/mA; bp = % pin uoc luong; vin = nguon vao mV;
+ *   chg = trang thai sac; "mp":<VINDPM mV> chi co khi MPPT dang bat;
+ *   "bf":"<loi>" chi co khi IC sac bao loi;
  *   rs = RSSI goi cuoi nhan tu gateway; mb = thanh ghi Modbus hoac "mbe":"<loi>".
  */
 static int build_report(char *buf, size_t len)
@@ -181,8 +231,15 @@ static int build_report(char *buf, size_t len)
         (unsigned long)board_flow_ml_per_min(1), (unsigned long)board_flow_total_ml(1),
         (unsigned long)board_flow_ml_per_min(2), (unsigned long)board_flow_total_ml(2));
     if (bq_ok) {
-        n += snprintf(buf + n, len - (size_t)n, ",\"vb\":%u,\"ib\":%d,\"vin\":%u,\"chg\":%u",
-                      bq.vbat_mv, bq.ibat_ma, bq.vbus_mv, bq.chg_stat);
+        char f[40];
+        n += snprintf(buf + n, len - (size_t)n, ",\"vb\":%u,\"ib\":%d,\"bp\":%u,\"vin\":%u,\"chg\":%u",
+                      bq.vbat_mv, bq.ibat_ma, bq_battery_percent(&bq), bq.vbus_mv, bq.chg_stat);
+        if (bq.mppt_on) {
+            n += snprintf(buf + n, len - (size_t)n, ",\"mp\":%u", bq.vindpm_mv);
+        }
+        if (bq_fault_str(&bq, f, sizeof(f))) {
+            n += snprintf(buf + n, len - (size_t)n, ",\"bf\":\"%s\"", f);
+        }
     }
     if (lora_rx_count) {
         n += snprintf(buf + n, len - (size_t)n, ",\"rs\":%d", lora_last_rssi);
@@ -410,49 +467,160 @@ static void tft_line(int row, const char *s, uint16_t color)
     tft_text(0, (uint16_t)(4 + row * 10 * sc), buf, color, TFT_BLACK, sc);
 }
 
+static uint8_t tft_scale(void)
+{
+    return (tft_width() >= 240) ? 2 : 1;
+}
+
+/* Thanh % ngang tren dong row, bat dau tu cot col (khong ve lai chu de khoi nhay) */
+static void tft_bar(int row, int col, uint8_t pct, uint16_t color)
+{
+    uint8_t sc = tft_scale();
+    uint16_t x = (uint16_t)(col * 6 * sc);
+    uint16_t y = (uint16_t)(4 + row * 10 * sc);
+    uint16_t h = (uint16_t)(7 * sc);
+    if (tft_width() <= x + 8u) { return; }
+    uint16_t w = (uint16_t)(tft_width() - x - 4u);
+    uint16_t in_w = (uint16_t)(w - 4u);
+    uint16_t fill = (uint16_t)((uint32_t)in_w * (pct > 100 ? 100 : pct) / 100u);
+
+    tft_fill_rect(x, y, w, 1, TFT_WHITE);                       /* khung */
+    tft_fill_rect(x, (uint16_t)(y + h - 1u), w, 1, TFT_WHITE);
+    tft_fill_rect(x, y, 1, h, TFT_WHITE);
+    tft_fill_rect((uint16_t)(x + w - 1u), y, 1, h, TFT_WHITE);
+    tft_fill_rect((uint16_t)(x + 2u), (uint16_t)(y + 2u), fill, (uint16_t)(h - 4u), color);
+    tft_fill_rect((uint16_t)(x + 2u + fill), (uint16_t)(y + 2u), (uint16_t)(in_w - fill),
+                  (uint16_t)(h - 4u), TFT_BLACK);
+}
+
+/* "12.34V" */
+static void fmt_v(char *b, size_t n, uint16_t mv)
+{
+    snprintf(b, n, "%u.%02uV", mv / 1000u, (mv % 1000u) / 10u);
+}
+
+/* "-49mA" hoac "1.25A" */
+static void fmt_i(char *b, size_t n, int16_t ma)
+{
+    int a = ma < 0 ? -ma : ma;
+    if (a < 1000) {
+        snprintf(b, n, "%dmA", ma);
+    } else {
+        snprintf(b, n, "%s%d.%02dA", ma < 0 ? "-" : "", a / 1000, (a % 1000) / 10);
+    }
+}
+
+/* Dong 0..3: node; dong 4..11: IC sac BQ25798 */
 static void tft_update(void)
 {
-    char s[48];
+    char s[64], a[16], b[16], c[16];
     uint32_t up = HAL_GetTick() / 1000u;
 
-    snprintf(s, sizeof(s), "NODE %s", node_id);
+    if (clk_valid()) {
+        clk_time_t t;
+        clk_get(&t);
+        snprintf(s, sizeof(s), "NODE %s %02u:%02u:%02u", node_id, t.hour, t.min, t.sec);
+    } else {
+        snprintf(s, sizeof(s), "NODE %s UP%02lu:%02lu", node_id, (unsigned long)(up / 3600u),
+                 (unsigned long)((up / 60u) % 60u));
+    }
     tft_line(0, s, TFT_CYAN);
-    snprintf(s, sizeof(s), "IN:%d%d%d  RELAY:%d%d", board_input_get(1), board_input_get(2),
-             board_input_get(3), board_relay_get(1), board_relay_get(2));
-    tft_line(1, s, TFT_WHITE);
-    for (int i = 1; i <= 2; i++) {
-        uint32_t r = board_flow_ml_per_min(i), t = board_flow_total_ml(i);
-        snprintf(s, sizeof(s), "F%d:%lu.%02luL/m %lu.%luL", i,
-                 (unsigned long)(r / 1000u), (unsigned long)((r % 1000u) / 10u),
-                 (unsigned long)(t / 1000u), (unsigned long)((t % 1000u) / 100u));
-        tft_line(1 + i, s, TFT_WHITE);
+    if (lora_ok) {
+        snprintf(s, sizeof(s), "IN:%d%d%d RL:%d%d TX:%lu %d", board_input_get(1), board_input_get(2),
+                 board_input_get(3), board_relay_get(1), board_relay_get(2),
+                 (unsigned long)lora_tx_count, lora_last_rssi);
+    } else {
+        snprintf(s, sizeof(s), "IN:%d%d%d RL:%d%d LORA LOI", board_input_get(1), board_input_get(2),
+                 board_input_get(3), board_relay_get(1), board_relay_get(2));
+    }
+    tft_line(1, s, lora_ok ? TFT_WHITE : TFT_RED);
+    {
+        uint32_t r1 = board_flow_ml_per_min(1), r2 = board_flow_ml_per_min(2);
+        snprintf(s, sizeof(s), "F1:%lu.%02lu F2:%lu.%02lu L/m",
+                 (unsigned long)(r1 / 1000u), (unsigned long)((r1 % 1000u) / 10u),
+                 (unsigned long)(r2 / 1000u), (unsigned long)((r2 % 1000u) / 10u));
+        tft_line(2, s, TFT_WHITE);
     }
     if (mb_st == MB_OK) {
         snprintf(s, sizeof(s), "MB:%u %u %u %u", mb_regs[0], mb_regs[1], mb_regs[2], mb_regs[3]);
     } else {
         snprintf(s, sizeof(s), "MB:%s", mb_status_str(mb_st));
     }
-    tft_line(4, s, mb_st == MB_OK ? TFT_WHITE : TFT_RED);
-    if (bq_ok) {
-        snprintf(s, sizeof(s), "BAT:%u.%02uV %dmA %s", bq.vbat_mv / 1000u, (bq.vbat_mv % 1000u) / 10u,
-                 bq.ibat_ma, bq.vbus_present ? "AC" : "");
-        tft_line(5, s, bq.vbus_present ? TFT_GREEN : TFT_YELLOW);
-    } else {
-        tft_line(5, "BAT: BQ25798 LOI", TFT_RED);
+    tft_line(3, s, mb_st == MB_OK ? TFT_WHITE : TFT_RED);
+
+    tft_line(4, "--- SAC PIN BQ25798 ---", TFT_YELLOW);
+    if (!bq_ok) {
+        tft_line(5, "IC SAC KHONG TRA LOI", TFT_RED);
+        for (int r = 6; r <= 11; r++) { tft_line(r, "", TFT_BLACK); }
+        return;
     }
-    snprintf(s, sizeof(s), "LORA:%s tx%lu rx%lu %d", lora_ok ? "OK" : "ERR",
-             (unsigned long)lora_tx_count, (unsigned long)lora_rx_count, lora_last_rssi);
-    tft_line(6, s, lora_ok ? TFT_WHITE : TFT_RED);
-    if (clk_valid()) {
-        clk_time_t t;
-        clk_get(&t);
-        snprintf(s, sizeof(s), "%02u/%02u/%04u %02u:%02u:%02u",
-                 t.day, t.mon, t.year, t.hour, t.min, t.sec);
-        tft_line(7, s, TFT_CYAN);
+
+    /* 5: trang thai sac */
+    bool charging = bq.chg_stat >= 1 && bq.chg_stat <= 6;
+    snprintf(s, sizeof(s), "TT: %s%s", bq_chg_str(bq.chg_stat), bq.en_chg ? "" : " (TAT)");
+    tft_line(5, s, charging ? TFT_GREEN : bq.chg_stat == 7 ? TFT_CYAN : TFT_WHITE);
+
+    /* 6: nguon vao */
+    if (bq.vbus_present) {
+        fmt_v(a, sizeof(a), bq.vbus_mv);
+        fmt_i(b, sizeof(b), bq.ibus_ma);
+        snprintf(s, sizeof(s), "VAO: %s %s%s%s", a, b, bq.mppt_on ? " MPPT" : "",
+                 bq.power_good ? "" : " !PG");
+        tft_line(6, s, bq.power_good ? TFT_GREEN : TFT_YELLOW);
     } else {
-        snprintf(s, sizeof(s), "UP %02lu:%02lu:%02lu", (unsigned long)(up / 3600u),
-                 (unsigned long)((up / 60u) % 60u), (unsigned long)(up % 60u));
-        tft_line(7, s, TFT_GRAY);
+        tft_line(6, "VAO: KHONG CO NGUON", TFT_GRAY);
+    }
+
+    /* 7: pin */
+    if (bq.vbat_present) {
+        fmt_v(a, sizeof(a), bq.vbat_mv);
+        fmt_i(b, sizeof(b), bq.ibat_ma);
+        snprintf(s, sizeof(s), "PIN: %s %s", a, b);
+        tft_line(7, s, bq.ibat_ma > 0 ? TFT_GREEN : TFT_WHITE);
+    } else {
+        tft_line(7, "PIN: KHONG CO PIN", TFT_RED);
+    }
+
+    /* 8: % pin + thanh */
+    {
+        uint8_t pct = bq.vbat_present ? bq_battery_percent(&bq) : 0;
+        uint16_t col = pct > 50 ? TFT_GREEN : pct > 20 ? TFT_YELLOW : TFT_RED;
+        snprintf(s, sizeof(s), "%3u%% ", pct);
+        tft_text(0, (uint16_t)(4 + 8 * 10 * tft_scale()), s, col, TFT_BLACK, tft_scale());
+        tft_bar(8, 5, pct, col);
+    }
+
+    /* 9: he thong + nhiet chip */
+    fmt_v(a, sizeof(a), bq.vsys_mv);
+    snprintf(s, sizeof(s), "SYS: %s CHIP %d.%dC", a, bq.tdie_x10 / 10,
+             (bq.tdie_x10 < 0 ? -bq.tdie_x10 : bq.tdie_x10) % 10);
+    tft_line(9, s, bq.treg ? TFT_YELLOW : TFT_WHITE);
+
+    /* 10: gia tri dat */
+    fmt_v(a, sizeof(a), bq.vreg_mv);
+    fmt_i(b, sizeof(b), (int16_t)bq.ichg_ma);
+    if (bq.mppt_on) {
+        /* MPPT: hien VINDPM chip vua dat theo VOC tam pin */
+        snprintf(c, sizeof(c), "M%u.%uV", bq.vindpm_mv / 1000u, (bq.vindpm_mv % 1000u) / 100u);
+    } else {
+        char t[12];
+        fmt_i(t, sizeof(t), (int16_t)bq.iindpm_ma);
+        snprintf(c, sizeof(c), "IN%s", t);
+    }
+    snprintf(s, sizeof(s), "DAT:%uS %s %s %s", bq.cells, a, b, c);
+    tft_line(10, s, TFT_GRAY);
+
+    /* 11: loi, neu khong co thi bao dang bi gioi han gi */
+    char f[40];
+    if (bq_fault_str(&bq, f, sizeof(f))) {
+        snprintf(s, sizeof(s), "LOI: %s", f);
+        tft_line(11, s, TFT_RED);
+    } else if (bq.iindpm_reg || bq.vindpm_reg || bq.treg || bq.vsys_min_reg) {
+        snprintf(s, sizeof(s), "GH:%s%s%s%s", bq.iindpm_reg ? " IINDPM" : "", bq.vindpm_reg ? " VINDPM" : "",
+                 bq.treg ? " NHIET" : "", bq.vsys_min_reg ? " VSYSMIN" : "");
+        tft_line(11, s, TFT_YELLOW);
+    } else {
+        tft_line(11, "LOI: KHONG", TFT_GREEN);
     }
 }
 
