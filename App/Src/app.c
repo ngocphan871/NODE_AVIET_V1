@@ -14,8 +14,11 @@
 #include "bq25798.h"
 #include "clock.h"
 #include "config.h"
+#include "es_rain.h"
+#include "i2c_diag.h"
 #include "modbus.h"
 #include "serial.h"
+#include "sht3x.h"
 #include "sx1262.h"
 #include "tft.h"
 #include "w25q.h"
@@ -40,12 +43,21 @@ static uint16_t mb_regs[MB_MAX_REGS];
 static bq_info_t bq;
 static bool bq_ok;
 
+/* Cam bien mua ES-RAIN-02 (RS485) */
+static mb_status_t rain_st = MB_ERR_TIMEOUT;
+static bool raining;
+
+/* SHT30 (I2C2) */
+static bool sht_ok;
+static int16_t sht_t_x10;
+static uint16_t sht_rh_x10;
+
 static uint32_t lora_tx_count, lora_tx_fail, lora_rx_count, lora_cmd_count;
 static uint16_t lora_seq;
 static int16_t lora_last_rssi;
 static int8_t lora_last_snr;
 
-static uint32_t t_1s, t_mb, t_led3;
+static uint32_t t_1s, t_mb, t_led3, t_rain, t_sht;
 static uint32_t t_last_tx;          /* lan gui gan nhat */
 static uint32_t t_next_tx;          /* lan gui ke tiep da hen */
 static bool report_now;
@@ -122,9 +134,80 @@ static void flash_test(void)
            memcmp(msg, back, sizeof(msg)) == 0 ? "OK" : "SAI");
 }
 
+__attribute__((unused))     /* chi dung khi CFG_MB_POLL_ENABLE = 1 */
 static void poll_modbus(void)
 {
     mb_st = mb_read_regs(CFG_MB_SLAVE, CFG_MB_FUNC, CFG_MB_START_REG, CFG_MB_REG_COUNT, mb_regs);
+}
+
+/* Cam bien mua: doi trang thai (hoac mat/co lai ket noi) thi log va bao ve gateway ngay */
+static void poll_rain(void)
+{
+#if CFG_RAIN_ENABLE
+    static bool first = true;
+    bool r = raining;
+    mb_status_t st = rain_read(&r);
+
+    if (st != rain_st && (first || st == MB_OK || rain_st == MB_OK)) {
+        if (st == MB_OK) {
+            printf("[MUA] Cam bien tra loi (dia chi %d, %lu baud)\n", CFG_RAIN_ADDR,
+                   (unsigned long)mb_baud());
+        } else {
+            printf("[MUA] Khong doc duoc cam bien: %s\n", mb_status_str(st));
+        }
+        if (!first) { report_now = true; }
+    }
+    if (st == MB_OK && (r != raining || first || rain_st != MB_OK)) {
+        if (r != raining || first) {
+            printf("[MUA] %s\n", r ? "CO MUA / TUYET" : "Khong mua");
+        }
+        if (r != raining && !first) { report_now = true; }
+        raining = r;
+    }
+    rain_st = st;
+    first = false;
+#endif
+}
+
+static void print_rain_cfg(void)
+{
+    rain_cfg_t c;
+    mb_status_t st = rain_read_cfg(&c);
+    if (st != MB_OK) {
+        printf("Cam bien mua: doc cau hinh loi (%s)\n", mb_status_str(st));
+        return;
+    }
+    printf("Cam bien mua: %s | suoi bat <%d.%d C, tat >%d.%d C, tre %u.%u C | xac nhan %u s | do nhay %u\n",
+           rain_st == MB_OK ? (raining ? "CO MUA" : "khong mua") : mb_status_str(rain_st),
+           c.heat_min_x10 / 10, (c.heat_min_x10 < 0 ? -c.heat_min_x10 : c.heat_min_x10) % 10,
+           c.heat_max_x10 / 10, (c.heat_max_x10 < 0 ? -c.heat_max_x10 : c.heat_max_x10) % 10,
+           c.heat_hys_x10 / 10u, c.heat_hys_x10 % 10u, c.delay_s, c.sensitivity);
+}
+
+/* SHT30: mat ket noi thi 10 s thu tim lai (cam nong vao CN5 cung duoc) */
+static void poll_sht(void)
+{
+#if CFG_SHT_ENABLE
+    static uint32_t t_retry;
+    if (!sht3x_present()) {
+        if (t_retry != 0 && (HAL_GetTick() - t_retry) < 10000u) { return; }
+        t_retry = HAL_GetTick();
+        if (!sht3x_init()) { return; }
+        printf("[SHT] Thay SHT3x o 0x%02X\n", sht3x_addr());
+    }
+    int16_t t;
+    uint16_t h;
+    bool ok = sht3x_read(&t, &h);
+    if (ok) {
+        sht_t_x10 = t;
+        sht_rh_x10 = h;
+    } else if (sht_ok) {
+        printf("[SHT] Doc loi, thu tim lai cam bien\n");
+        sht3x_init();
+        t_retry = HAL_GetTick();
+    }
+    sht_ok = ok;
+#endif
 }
 
 /* Doc IC sac moi giay; in ra console khi trang thai sac / nguon vao / loi thay doi */
@@ -190,11 +273,27 @@ static void print_status(void)
                (unsigned long)board_flow_ml_per_min(i), (unsigned long)board_flow_total_ml(i),
                (unsigned long)board_flow_pulses(i));
     }
+#if CFG_RAIN_ENABLE
+    printf("Mua    : %s (ES-RAIN-02 dia chi %d, %lu baud)\n",
+           rain_st == MB_OK ? (raining ? "CO MUA" : "khong mua") : mb_status_str(rain_st),
+           CFG_RAIN_ADDR, (unsigned long)mb_baud());
+#endif
+#if CFG_SHT_ENABLE
+    if (sht_ok) {
+        printf("SHT30  : %d.%d C, %u.%u %%RH (0x%02X)\n", sht_t_x10 / 10,
+               (sht_t_x10 < 0 ? -sht_t_x10 : sht_t_x10) % 10, sht_rh_x10 / 10u, sht_rh_x10 % 10u,
+               sht3x_addr());
+    } else {
+        printf("SHT30  : %s\n", sht3x_present() ? "doc loi" : "khong thay tren I2C2 (CN5)");
+    }
+#endif
+#if CFG_MB_POLL_ENABLE
     printf("Modbus : slave %d FC%d -> %s", CFG_MB_SLAVE, CFG_MB_FUNC, mb_status_str(mb_st));
     if (mb_st == MB_OK) {
         for (int i = 0; i < CFG_MB_REG_COUNT; i++) { printf(" %u", mb_regs[i]); }
     }
     printf("\n");
+#endif
     if (bq_ok) {
         printf("Pin    : VBAT %u mV (~%u%%), IBAT %d mA, VIN %u mV, %s\n",
                bq.vbat_mv, bq_battery_percent(&bq), bq.ibat_ma, bq.vbus_mv, bq_chg_str(bq.chg_stat));
@@ -214,8 +313,10 @@ static void print_status(void)
 /*
  * Goi gui ve gateway, vi du:
  * {"id":"1A2B3C4D","n":12,"up":3600,"in":[0,1,0],"rl":[0,1],"f1":[1500,23000],"f2":[0,0],
- *  "vb":12450,"ib":-120,"bp":80,"vin":0,"chg":0,"rs":-87,"mb":[1,2,3]}
- *   f1/f2 = [mL/phut, tong mL]; vb/ib = pin mV/mA; bp = % pin uoc luong; vin = nguon vao mV;
+ *  "rain":0,"t":253,"h":651,"vb":12450,"ib":-120,"bp":80,"vin":0,"chg":0,"rs":-87}
+ *   f1/f2 = [mL/phut, tong mL]; rain = 1 co mua (loi thi "rne":"<loi>");
+ *   t / h = nhiet do 0.1 C / do am 0.1 %RH tu SHT30 (khong co neu loi);
+ *   vb/ib = pin mV/mA; bp = % pin uoc luong; vin = nguon vao mV;
  *   chg = trang thai sac; "mp":<VINDPM mV> chi co khi MPPT dang bat;
  *   "bf":"<loi>" chi co khi IC sac bao loi;
  *   rs = RSSI goi cuoi nhan tu gateway; mb = thanh ghi Modbus hoac "mbe":"<loi>".
@@ -230,6 +331,16 @@ static int build_report(char *buf, size_t len)
         board_relay_get(1), board_relay_get(2),
         (unsigned long)board_flow_ml_per_min(1), (unsigned long)board_flow_total_ml(1),
         (unsigned long)board_flow_ml_per_min(2), (unsigned long)board_flow_total_ml(2));
+#if CFG_RAIN_ENABLE
+    if (rain_st == MB_OK) {
+        n += snprintf(buf + n, len - (size_t)n, ",\"rain\":%d", raining);
+    } else {
+        n += snprintf(buf + n, len - (size_t)n, ",\"rne\":\"%s\"", mb_status_str(rain_st));
+    }
+#endif
+    if (sht_ok) {
+        n += snprintf(buf + n, len - (size_t)n, ",\"t\":%d,\"h\":%u", sht_t_x10, sht_rh_x10);
+    }
     if (bq_ok) {
         char f[40];
         n += snprintf(buf + n, len - (size_t)n, ",\"vb\":%u,\"ib\":%d,\"bp\":%u,\"vin\":%u,\"chg\":%u",
@@ -244,6 +355,7 @@ static int build_report(char *buf, size_t len)
     if (lora_rx_count) {
         n += snprintf(buf + n, len - (size_t)n, ",\"rs\":%d", lora_last_rssi);
     }
+#if CFG_MB_POLL_ENABLE
     if (mb_st == MB_OK) {
         unsigned cnt = CFG_MB_REG_COUNT < LORA_MB_MAX ? CFG_MB_REG_COUNT : LORA_MB_MAX;
         n += snprintf(buf + n, len - (size_t)n, ",\"mb\":[");
@@ -254,6 +366,7 @@ static int build_report(char *buf, size_t len)
     } else {
         n += snprintf(buf + n, len - (size_t)n, ",\"mbe\":\"%s\"", mb_status_str(mb_st));
     }
+#endif
     n += snprintf(buf + n, len - (size_t)n, "}");
     return n;
 }
@@ -326,12 +439,56 @@ static void cmd_exec(char *s, bool remote)
         mb_status_t st = mb_write_reg((uint8_t)atoi(argv[1]), (uint16_t)atoi(argv[2]),
                                       (uint16_t)atoi(argv[3]));
         printf("Modbus ghi: %s\n", mb_status_str(st));
+#if CFG_MB_POLL_ENABLE
         poll_modbus();
+#endif
         report_now = true;
     } else if (strcmp(argv[0], "chg") == 0 && argc == 2) {
         bool on = atoi(argv[1]) != 0;
         printf("Sac pin: %s -> %s\n", on ? "bat" : "tat", bq_charge_enable(on) ? "OK" : "LOI");
         report_now = true;
+    } else if (strcmp(argv[0], "rain") == 0) {
+        static const struct { const char *name; uint16_t reg; } keys[] = {
+            { "hmax", RAIN_REG_HEAT_MAX }, { "hmin", RAIN_REG_HEAT_MIN }, { "hys", RAIN_REG_HEAT_HYS },
+            { "delay", RAIN_REG_DELAY },   { "sens", RAIN_REG_SENS },
+        };
+        if (argc == 3) {
+            unsigned i;
+            for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+                if (strcmp(argv[1], keys[i].name) == 0) { break; }
+            }
+            if (i == sizeof(keys) / sizeof(keys[0])) {
+                printf("rain <hmax|hmin|hys|delay|sens> <gia tri>\n");
+                return;
+            }
+            /* hmax/hmin/hys nhap theo do C (vd 35 hoac 35.5), thanh ghi luu 0.1 C */
+            int16_t v = (keys[i].reg <= RAIN_REG_HEAT_HYS)
+                        ? (int16_t)(strtof(argv[2], NULL) * 10.0f + (argv[2][0] == '-' ? -0.5f : 0.5f))
+                        : (int16_t)atoi(argv[2]);
+            mb_status_t st = rain_write(keys[i].reg, v);
+            printf("Cam bien mua ghi %s = %s: %s\n", argv[1], argv[2], mb_status_str(st));
+        }
+        print_rain_cfg();
+    } else if (strcmp(argv[0], "sht") == 0) {
+        if (argc == 3 && strcmp(argv[1], "heat") == 0) {
+            bool on = atoi(argv[2]) != 0;
+            printf("SHT bo suoi: %s -> %s\n", on ? "bat" : "tat", sht3x_heater(on) ? "OK" : "LOI");
+            return;
+        }
+        if (!sht3x_present() && !sht3x_init()) {
+            printf("SHT3x: khong thay o 0x44/0x45 tren I2C2 (CN5)\n");
+            return;
+        }
+        int16_t t;
+        uint16_t h, stat = 0;
+        bool ok = sht3x_read(&t, &h);
+        sht3x_read_status(&stat);
+        if (ok) {
+            printf("SHT3x 0x%02X: %d.%d C, %u.%u %%RH, status 0x%04X%s\n", sht3x_addr(), t / 10,
+                   (t < 0 ? -t : t) % 10, h / 10u, h % 10u, stat, (stat & 0x2000u) ? " (dang suoi)" : "");
+        } else {
+            printf("SHT3x 0x%02X: doc loi (I2C/CRC)\n", sht3x_addr());
+        }
     } else if (remote) {
         printf("Lenh tu xa khong hop le: %s\n", argv[0]);
     } else if (strcmp(argv[0], "mb") == 0 && argc == 5) {
@@ -366,10 +523,20 @@ static void cmd_exec(char *s, bool remote)
     } else if (strcmp(argv[0], "i2c") == 0) {
         i2c_scan(&hi2c1, "I2C1 (BQ25798, PB8/PB9)");
         i2c_scan(&hi2c2, "I2C2 (CN5, PB10/PB11)");
+    } else if (strcmp(argv[0], "i2cfind") == 0) {
+        i2c_diag_find();
+        if (!sht3x_present() && sht3x_init()) { printf("SHT3x: thay o 0x%02X\n", sht3x_addr()); }
     } else if (strcmp(argv[0], "flash") == 0) {
         flash_test();
     } else if (strcmp(argv[0], "id") == 0) {
         printf("Ma node: %s\n", node_id);
+    } else if (strcmp(argv[0], "baud") == 0) {
+        if (argc == 2) {
+            mb_init((uint32_t)atol(argv[1]));
+            ser_init();                     /* bat lai nhan ngat cho UART4 */
+        }
+        printf("RS485: %lu baud (mac dinh CFG_RS485_BAUD = %lu)\n", (unsigned long)mb_baud(),
+               (unsigned long)CFG_RS485_BAUD);
     } else {
         printf("Lenh (* = cung dung duoc tu gateway qua LoRa \"@%s <lenh>\"):\n"
                "  status                  in trang thai (* = gui bao cao ngay)\n"
@@ -378,10 +545,15 @@ static void cmd_exec(char *s, bool remote)
                "  time YYYY-MM-DD HH:MM:SS  xem / dat gio RTC (*)\n"
                "  mbw <slave> <addr> <val>     ghi 1 thanh ghi Modbus (*)\n"
                "  chg <0|1>               tat/bat sac pin (*)\n"
+               "  rain [hmax|hmin|hys|delay|sens <gt>]  cam bien mua: xem / dat cau hinh (*)\n"
+               "                          hmax/hmin/hys: do C (vd 35.5), delay: giay, sens: 500..3500\n"
+               "  sht [heat 0|1]          doc SHT30 / bat-tat bo suoi trong chip (*)\n"
                "  mb <slave> <fc> <addr> <n>   doc thanh ghi Modbus (fc 3/4)\n"
+               "  baud [toc do]           xem / doi toc do RS485 (tam thoi)\n"
                "  lora <noi dung>         gui goi LoRa tho\n"
                "  bq [reg [val]]          trang thai IC sac / doc / ghi thanh ghi (hex)\n"
                "  i2c                     quet 2 bus I2C\n"
+               "  i2cfind                 do day SHT30 tren CN5 (thu moi cap chan 3-6)\n"
                "  flash                   thu ghi/doc W25Q32\n"
                "  id                      in ma node\n", node_id);
     }
@@ -513,7 +685,7 @@ static void fmt_i(char *b, size_t n, int16_t ma)
 /* Dong 0..3: node; dong 4..11: IC sac BQ25798 */
 static void tft_update(void)
 {
-    char s[64], a[16], b[16], c[16];
+    char s[96], a[24], b[24], c[24];
     uint32_t up = HAL_GetTick() / 1000u;
 
     if (clk_valid()) {
@@ -541,12 +713,20 @@ static void tft_update(void)
                  (unsigned long)(r2 / 1000u), (unsigned long)((r2 % 1000u) / 10u));
         tft_line(2, s, TFT_WHITE);
     }
-    if (mb_st == MB_OK) {
-        snprintf(s, sizeof(s), "MB:%u %u %u %u", mb_regs[0], mb_regs[1], mb_regs[2], mb_regs[3]);
-    } else {
-        snprintf(s, sizeof(s), "MB:%s", mb_status_str(mb_st));
+    /* 3: mua + nhiet do / do am */
+    {
+        bool rain_ok = rain_st == MB_OK;
+        snprintf(a, sizeof(a), "MUA:%s", !rain_ok ? "LOI" : raining ? "CO" : "KO");
+        if (sht_ok) {
+            snprintf(b, sizeof(b), "%d.%dC %u.%u%%", sht_t_x10 / 10, (sht_t_x10 < 0 ? -sht_t_x10 : sht_t_x10) % 10,
+                     sht_rh_x10 / 10u, sht_rh_x10 % 10u);
+        } else {
+            snprintf(b, sizeof(b), "T/H:LOI");
+        }
+        snprintf(s, sizeof(s), "%s %s", a, b);
+        tft_line(3, s, (!rain_ok && !sht_ok) ? TFT_RED : (!rain_ok || !sht_ok) ? TFT_YELLOW
+                       : raining ? TFT_CYAN : TFT_WHITE);
     }
-    tft_line(3, s, mb_st == MB_OK ? TFT_WHITE : TFT_RED);
 
     tft_line(4, "--- SAC PIN BQ25798 ---", TFT_YELLOW);
     if (!bq_ok) {
@@ -659,6 +839,7 @@ static void input_task(void)
 void app_init(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
+    mb_init(CFG_RS485_BAUD);            /* phai truoc ser_init: khoi tao lai UART4 */
     ser_init();
     board_led_set(true);
     board_led3_set(false);
@@ -693,12 +874,28 @@ void app_init(void)
     tft_ok = true;
 
     i2c_scan(&hi2c2, "I2C2 (CN5, PB10/PB11)");
+#if CFG_SHT_ENABLE
+    if (sht3x_init()) {
+        poll_sht();
+        printf("SHT3x: 0x%02X, %d.%d C, %u.%u %%RH\n", sht3x_addr(), sht_t_x10 / 10,
+               (sht_t_x10 < 0 ? -sht_t_x10 : sht_t_x10) % 10, sht_rh_x10 / 10u, sht_rh_x10 % 10u);
+    } else {
+        printf("SHT3x: KHONG THAY tren I2C2 (CN5), se thu lai moi 10 s\n");
+    }
+#endif
+#if CFG_RAIN_ENABLE
+    poll_rain();
+    if (rain_st == MB_OK) { print_rain_cfg(); }
+#endif
     board_flow_update();
+#if CFG_MB_POLL_ENABLE
     poll_modbus();
+#endif
     tft_update();
     printf("Go \"help\" de xem lenh.\n");
 
-    t_1s = t_mb = HAL_GetTick();
+    t_1s = t_mb = t_rain = HAL_GetTick();
+    t_sht = t_rain - CFG_SHT_POLL_MS / 2u;     /* lech pha voi cam bien mua */
     /* Goi dau tien sau 2..2+JITTER s de cac node khoi dong cung luc khong dung nhau */
     t_last_tx = HAL_GetTick() + 2000u - CFG_REPORT_PERIOD_MS;
     schedule_periodic();
@@ -731,8 +928,22 @@ void app_loop(void)
         poll_bq();
         tft_update();
     }
+#if CFG_RAIN_ENABLE
+    if (now - t_rain >= CFG_RAIN_POLL_MS) {
+        t_rain = now;
+        poll_rain();
+    }
+#endif
+#if CFG_SHT_ENABLE
+    if (now - t_sht >= CFG_SHT_POLL_MS) {
+        t_sht = now;
+        poll_sht();
+    }
+#endif
+#if CFG_MB_POLL_ENABLE
     if (now - t_mb >= CFG_MB_POLL_PERIOD_MS) {
         t_mb = now;
         poll_modbus();
     }
+#endif
 }

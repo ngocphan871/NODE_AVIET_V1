@@ -14,12 +14,27 @@
 #define CFG_REPORT_MIN_GAP_MS   3000u
 
 /* ===================== RS485 Modbus RTU ===================== */
-#define CFG_MB_SLAVE            1           /* dia chi slave can doc */
+/* Moi thiet bi tren bus phai cung toc do. ES-RAIN-02 mac dinh 4800 (doi duoc 2400/4800/9600). */
+#define CFG_RS485_BAUD          4800u
+
+/* Cam bien mua ES-RAIN-02 */
+#define CFG_RAIN_ENABLE         1
+#define CFG_RAIN_ADDR           1           /* dia chi Modbus, mac dinh 0x01 */
+#define CFG_RAIN_POLL_MS        2000u
+
+/* Doc thanh ghi Modbus chung (thiet bi khac tren bus, VD dong ho dien). 0 = tat.
+ * Neu bat thi CFG_MB_SLAVE phai khac CFG_RAIN_ADDR. */
+#define CFG_MB_POLL_ENABLE      0
+#define CFG_MB_SLAVE            2           /* dia chi slave can doc */
 #define CFG_MB_FUNC             3           /* 3 = holding, 4 = input register */
 #define CFG_MB_START_REG        0
 #define CFG_MB_REG_COUNT        10          /* toi da MB_MAX_REGS (32); goi LoRa chi chua 16 */
-#define CFG_MB_TIMEOUT_MS       300u
+#define CFG_MB_TIMEOUT_MS       200u        /* cho tra loi; 4800 baud: khung 7 byte ~15 ms */
 #define CFG_MB_POLL_PERIOD_MS   5000u
+
+/* ===================== Nhiet do / do am SHT30 (CN5, I2C2) ===================== */
+#define CFG_SHT_ENABLE          1
+#define CFG_SHT_POLL_MS         2000u
 
 /* ===================== LoRa SX1262 (module S62F) ===================== */
 /* PHAI GIONG HET gateway (GATEWAY_AVIET_V1/App/Inc/config.h) thi moi nghe duoc nhau */

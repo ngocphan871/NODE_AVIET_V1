@@ -5,6 +5,20 @@
 
 static uint8_t last_exc;
 
+void mb_init(uint32_t baud)
+{
+    UART_HandleTypeDef *h = ser_handle(SER_485);
+    if (h->Init.BaudRate == baud) { return; }
+    HAL_UART_DeInit(h);
+    h->Init.BaudRate = baud;
+    if (HAL_UART_Init(h) != HAL_OK) { Error_Handler(); }
+}
+
+uint32_t mb_baud(void)
+{
+    return ser_handle(SER_485)->Init.BaudRate;
+}
+
 static uint16_t crc16(const uint8_t *p, uint16_t n)
 {
     uint16_t crc = 0xFFFF;

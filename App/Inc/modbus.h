@@ -17,6 +17,10 @@ typedef enum {
     MB_ERR_PARAM,
 } mb_status_t;
 
+/* Dat toc do UART4 (2400/4800/9600...). Goi TRUOC ser_init() vi phai khoi tao lai UART. */
+void        mb_init(uint32_t baud);
+uint32_t    mb_baud(void);
+
 /* func = 3 (holding) hoac 4 (input) */
 mb_status_t mb_read_regs(uint8_t slave, uint8_t func, uint16_t addr,
                          uint16_t count, uint16_t *out);
