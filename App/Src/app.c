@@ -227,6 +227,20 @@ static void poll_bq(void)
     bq_ok = ok;
     if (!ok) { return; }
 
+    {   /* Nguon vao yeu -> chip HIZ: chi log khi doi trang thai, thu lai thi im lang */
+        static bool last_weak, last_pg;
+        bool weak = bq.vbus_present && !bq.power_good && bq.en_hiz;
+        if (weak && !last_weak) {
+            printf("[BQ] Nguon vao YEU: VBUS %u mV khong giu duoc khi tai 10 mA -> chip HIZ, khong sac"
+                   " (thu lai moi %lu s)\n", bq.vbus_mv, (unsigned long)(CFG_BQ_HIZ_RETRY_MS / 1000u));
+        }
+        if (bq.power_good && !last_pg && !first) {
+            printf("[BQ] Nguon vao DAT (PG), VBUS %u mV\n", bq.vbus_mv);
+        }
+        last_weak = weak;
+        last_pg = bq.power_good;
+        bq_hiz_retry_task(&bq);
+    }
     if (bq_mppt_task(&bq)) {
         bq_read(&bq);
         printf("[BQ] Bat MPPT (VBUS %u mV) -> %s\n", bq.vbus_mv, bq.mppt_on ? "OK" : "chip tu choi");

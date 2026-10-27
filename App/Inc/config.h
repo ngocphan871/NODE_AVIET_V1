@@ -38,16 +38,24 @@
 
 /* ===================== LoRa SX1262 (module S62F) ===================== */
 /* PHAI GIONG HET gateway (GATEWAY_AVIET_V1/App/Inc/config.h) thi moi nghe duoc nhau */
-#define CFG_LORA_FREQ_HZ        433000000u  /* doi theo bang tan module: 433/470/868/915/923 MHz */
+#define CFG_LORA_FREQ_HZ        433000000u  /* S68F chi dung 433..510 MHz (mach loc / phoi hop anten) */
+#if (CFG_LORA_FREQ_HZ < 433000000u) || (CFG_LORA_FREQ_HZ > 510000000u)
+#error "CFG_LORA_FREQ_HZ ngoai dai 433..510 MHz cua module S68F"
+#endif
 #define CFG_LORA_SF             9           /* 5..12 */
 #define CFG_LORA_BW             125         /* kHz: 125, 250, 500 */
 #define CFG_LORA_CR             5           /* 4/5 .. 4/8 -> 5..8 */
 #define CFG_LORA_TX_DBM         22          /* -9..22 */
 #define CFG_LORA_PREAMBLE       8
 #define CFG_LORA_SYNC_PUBLIC    0           /* 0 = private 0x1424, 1 = public/LoRaWAN 0x3444 */
-/* Gateway da kiem: module S62F dung TCXO cap boi DIO3 (TCXO=0 -> loi XOSC_START 0x0020) */
+/* Module AcSiP S68F (SX1268): TCXO 32 MHz trong module, DIO3 cap nguon.
+ * S68F Application Note 4.4: tcxoVoltage = 0x06 (3.0 V). (Ma: 0x00 1.6V ... 0x02 1.8V ... 0x06 3.0V 0x07 3.3V) */
 #define CFG_LORA_USE_TCXO       1
-/* Chuyen mach anten (RF_VCC1 = PC9, RF_VCC2 = PA10), giong gateway */
+#define CFG_LORA_TCXO_VOLTAGE   0x06
+/* Thu o che do "boosted gain" (thanh ghi 0x08AC = 0x96): nhay hon ~2 dB, them ~1 mA */
+#define CFG_LORA_RX_BOOST       1
+/* Chuyen mach anten (RF_VCC1 = PC9, RF_VCC2 = PA10) - bang su that S68F AN 3.6:
+ * phat VC1 = H, VC2 = L; thu VC1 = L, VC2 = H */
 #define CFG_LORA_TX_VC1         1
 #define CFG_LORA_TX_VC2         0
 #define CFG_LORA_RX_VC1         0
@@ -73,6 +81,10 @@
 #define CFG_BQ_VOC_PCT          5           /* VINDPM/VOC: 0=56.25% 1=62.5% 2=68.75% 3=75% 4=81.25% 5=87.5% 6=93.75% 7=100% */
 #define CFG_BQ_VOC_DLY          1           /* cho truoc khi do VOC: 0=50ms 1=300ms 2=2s 3=5s */
 #define CFG_BQ_VOC_RATE         1           /* chu ky do VOC: 0=30s 1=2phut 2=10phut 3=30phut */
+
+/* Nguon vao yeu (VBUS < 3.4 V khi keo 10 mA, vd tam pin luc thieu nang) -> chip tu vao HIZ va
+ * 7 phut moi kiem tra lai. Firmware xoa EN_HIZ sau moi khoang nay de kiem tra som. 0 = de chip tu lo. */
+#define CFG_BQ_HIZ_RETRY_MS     60000u
 
 /* Loai pin de uoc luong % tren man hinh: 0 = Li-ion/Li-po (3.3..4.2 V/cell), 1 = LiFePO4 */
 #define CFG_BAT_CHEMISTRY       0

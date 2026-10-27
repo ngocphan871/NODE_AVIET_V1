@@ -1,9 +1,12 @@
 /*
- * LoRa SX1262 (module S62F, sheet MODULE_RF) tren SPI3:
+ * LoRa module AcSiP S68F (chip Semtech SX1268, 433..510 MHz; so do ghi "S62F") tren SPI3:
  *   SCK PC10, MISO PC11, MOSI PC12, NSS PA15, NRST PD1,
- *   BUSY PA8, DIO1 PA9 (ngat TX/RX done), DIO2 PD0,
- *   RF_VCC1 PC9 / RF_VCC2 PA10 = chuyen mach anten TX/RX.
- * Module co cuon 15uH VREG-DCC_SW nen bat DC-DC.
+ *   BUSY PA8, DIO1 PA9 (ngat TX/RX done), DIO2 PD0 (khong dung),
+ *   RF_VCC1 PC9 / RF_VCC2 PA10 = chuyen mach anten, MCU dieu khien ca 2 chan ("Mode A"
+ *   trong S68F Application Note 3.6): TX = VC1 1 / VC2 0, RX = VC1 0 / VC2 1.
+ * TCXO 32 MHz trong module, cap boi DIO3 o 3.0 V (AN 4.4: tcxoVoltage = 0x06).
+ * Module co cuon 15uH VREG-DCC_SW (AN muc 2) nen bat DC-DC.
+ * SX1268 cung bo lenh voi SX1262 nen ten ham giu sx1262_*.
  */
 #ifndef SX1262_H
 #define SX1262_H

@@ -177,12 +177,34 @@ bool bq_read(bq_info_t *bq)
     return true;
 }
 
+bool bq_hiz_retry_task(const bq_info_t *bq)
+{
+#if CFG_BQ_HIZ_RETRY_MS
+    static uint32_t t_try;
+    /* Datasheet 7.3.4.2: nguon vao khong giu duoc VBUS > 3.4 V khi keo 10 mA -> chip dat EN_HIZ,
+     * 7 phut moi thu lai. Xoa EN_HIZ de chip kiem tra lai som (vd tam pin mat troi vua co nang). */
+    if (!bq->vbus_present || bq->power_good || !bq->en_hiz) {
+        t_try = HAL_GetTick();
+        return false;
+    }
+    if ((HAL_GetTick() - t_try) < CFG_BQ_HIZ_RETRY_MS) { return false; }
+    t_try = HAL_GetTick();
+    return update_bits(REG_CTRL0, 0x04u, 0x00u);
+#else
+    (void)bq;
+    return false;
+#endif
+}
+
 bool bq_mppt_task(const bq_info_t *bq)
 {
 #if CFG_BQ_MPPT
     static uint32_t t_try;
-    /* Dieu kien cua chip: co VBUS va VBAT >= VSYSMIN (VSYS_STAT = 0), neu khong bit tu ve 0 */
-    if (bq->mppt_on || !bq->vbus_present || bq->vsys_min_reg) { return false; }
+    /* Dieu kien cua chip: co VBUS, nguon da qua kiem tra (PG), khong HIZ, va VBAT >= VSYSMIN
+     * (VSYS_STAT = 0); neu khong bit EN_MPPT tu ve 0 */
+    if (bq->mppt_on || !bq->vbus_present || !bq->power_good || bq->en_hiz || bq->vsys_min_reg) {
+        return false;
+    }
     if (t_try != 0 && (HAL_GetTick() - t_try) < 10000u) { return false; }   /* chip tu choi: 10 s thu lai */
     t_try = HAL_GetTick();
     return update_bits(REG_MPPT, 0x01u, 0x01u);

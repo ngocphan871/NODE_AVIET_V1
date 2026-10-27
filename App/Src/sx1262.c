@@ -35,6 +35,7 @@ extern SPI_HandleTypeDef hspi3;
 #define REG_SYNC_WORD           0x0740
 #define REG_TX_CLAMP            0x08D8
 #define REG_OCP                 0x08E7
+#define REG_RX_GAIN             0x08AC  /* 0x94 tiet kiem dien, 0x96 boosted */
 
 #define IRQ_TX_DONE             0x0001
 #define IRQ_RX_DONE             0x0002
@@ -176,8 +177,8 @@ bool sx1262_init(void)
     }
 
 #if CFG_LORA_USE_TCXO
-    {   /* DIO3 cap 1.8 V cho TCXO, cho 5 ms */
-        uint8_t t[4] = { 0x02, 0x00, 0x01, 0x40 };
+    {   /* DIO3 cap nguon TCXO (S68F: 0x06 = 3.0 V), cho 5 ms = 320 x 15.625 us */
+        uint8_t t[4] = { CFG_LORA_TCXO_VOLTAGE, 0x00, 0x01, 0x40 };
         cmd(OP_SET_DIO3_TCXO, t, 4);
     }
 #endif
@@ -206,6 +207,13 @@ bool sx1262_init(void)
     write_reg(REG_TX_CLAMP, &clamp, 1);
 
     cmd(OP_SET_BUF_BASE, (const uint8_t[]){ 0x00, 0x00 }, 2);
+
+#if CFG_LORA_RX_BOOST
+    {   /* Thu "boosted": do nhay tot hon ~2 dB, them ~1 mA (spec S68F do RX o che do nay) */
+        uint8_t g = 0x96;
+        write_reg(REG_RX_GAIN, &g, 1);
+    }
+#endif
 
     uint8_t bw = (CFG_LORA_BW >= 500) ? 0x06 : (CFG_LORA_BW >= 250) ? 0x05 : 0x04;
     /* LDRO bat khi thoi gian 1 symbol >= 16 ms */

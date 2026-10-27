@@ -60,6 +60,9 @@ bool bq_charge_enable(bool on);         /* bit EN_CHG + chan CE */
 /* Goi sau moi bq_read(): bat lai EN_MPPT khi co nguon vao (chip tu tat khi mat VBUS).
  * Tra ve true neu vua bat. Khong lam gi neu CFG_BQ_MPPT = 0. */
 bool bq_mppt_task(const bq_info_t *bq);
+/* Goi sau moi bq_read(): nguon vao yeu bi chip dua vao HIZ thi moi CFG_BQ_HIZ_RETRY_MS xoa EN_HIZ
+ * de chip kiem tra lai nguon (mac dinh chip 7 phut moi thu). Tra ve true neu vua xoa. */
+bool bq_hiz_retry_task(const bq_info_t *bq);
 bool bq_reg_read(uint8_t reg, uint8_t *val);
 bool bq_reg_write(uint8_t reg, uint8_t val);
 
